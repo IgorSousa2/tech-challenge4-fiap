@@ -169,7 +169,7 @@ Alertas de severidade média ou alta **no vídeo e no áudio ao mesmo tempo** ge
 
 A demonstração completa do funcionamento do projeto está disponível em:
 
-(inserir link do YouTube/Vimeo)
+https://youtu.be/aavpzonb2gM
 
 ## Observações
 
