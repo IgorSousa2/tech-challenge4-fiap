@@ -183,4 +183,4 @@ A demonstração completa do funcionamento do projeto está disponível em:
 - Igor de Sousa
 - RM 371788
 - FIAP - Pós-Tech IA para Devs - 9IADT
-- Grupo (inserir número do grupo)
+- Grupo 105
