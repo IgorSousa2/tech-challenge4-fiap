@@ -1,0 +1,376 @@
+================================================================================
+RELATÓRIO TÉCNICO - TECH CHALLENGE FASE 4
+Monitoramento Multimodal de Pacientes (Vídeo + Áudio + Texto) com OpenPose e YOLOv8
+================================================================================
+
+Autor: Igor de Sousa (RM 371788)
+Curso: FIAP - Pós-Tech IA para Devs - 9IADT - Grupo 105
+Repositório: https://github.com/IgorSousa2/tech-challenge4-fiap
+Vídeo de demonstração: https://youtu.be/aavpzonb2gM
+
+--------------------------------------------------------------------------------
+1. INTRODUÇÃO E CONTEXTO DO DESAFIO
+--------------------------------------------------------------------------------
+
+O desafio propõe um sistema de monitoramento clínico multimodal, capaz de
+analisar vídeos (sessões de fisioterapia ou cirurgias gravadas) e áudios
+(consultas médicas) para identificar sinais precoces de risco e alertar a
+equipe médica. Os requisitos do enunciado são:
+  a) Análise de vídeo: estimar a postura do paciente (OpenPose/YOLOv8),
+     detectar desvios do padrão esperado e gerar um relatório automático;
+  b) Análise de áudio: extrair características da voz (alterações vocais) e
+     identificar termos críticos e sentimento no relato do paciente;
+  c) Emitir alertas para a equipe médica quando houver sinais de risco;
+  d) Entregar o código em repositório Git, este relatório técnico e um vídeo
+     de demonstração de até 15 minutos.
+
+Decisões de escopo:
+  - A integração com serviços da Azure (Speech e Text Analytics) e o módulo de
+    detecção de anomalias (sinais vitais, prescrições, movimentação) foram
+    definidos como fora do escopo de avaliação. Por isso, toda a análise de
+    áudio e de texto é feita localmente, sem serviços em nuvem.
+  - O código foi mantido próximo da estrutura dos scripts desenvolvidos em
+    aula (facial_detection.py, transcribe_audio.py, detect_expression_video.py
+    etc.): funções pequenas, bibliotecas já usadas em aula (OpenCV,
+    SpeechRecognition, ultralytics) e um fluxo linear de leitura, análise e
+    saída.
+  - Para a análise postural foi usado o OpenPose, no lugar do YOLOv8-pose, por
+    escolha do projeto. O YOLOv8 é usado para localizar a pessoa e os objetos.
+
+A solução foi dividida em módulos independentes, unificados por um orquestrador:
+  - video_analysis/: processa o vídeo com YOLOv8 + OpenPose, extrai
+    características posturais quadro a quadro, detecta desvios e gera relatório.
+  - audio_analysis/: processa o áudio da consulta, extrai características
+    vocais, transcreve a fala e identifica termos críticos e sentimento.
+  - run_multimodal.py: executa os dois módulos para o mesmo paciente, funde os
+    resultados e calcula o risco geral.
+  - alerts.py: formato padrão de alerta, compartilhado por todos os módulos.
+
+--------------------------------------------------------------------------------
+2. FONTES DE DADOS E PRÉ-PROCESSAMENTO
+--------------------------------------------------------------------------------
+
+2.1 Fontes de dados utilizadas
+  - UR Fall Detection Dataset (Universidade de Rzeszów; Kwolek e Kepski, 2014):
+    sequências de quedas e atividades do dia a dia gravadas por câmera Kinect
+    fixa, com uma pessoa em corpo inteiro em um quarto. Foram usadas 5
+    sequências de queda (fall-01 a fall-05), câmera 0 (vista frontal, RGB,
+    640x480, 30 fps). Licença CC BY-NC-SA 4.0 (uso acadêmico, não comercial).
+  - Vídeos de teste do YouTube (pasta test_data/youtube/): 2 vídeos verticais
+    (1080x1920, 30 fps) de uma pessoa realizando testes funcionais, em corpo
+    inteiro e com câmera parada:
+      * ok1-video.mp4 (14,9 s): caminhada de frente para a câmera em um
+        corredor, até um cone e retorno à cadeira;
+      * ok2-video.mp4 (36,0 s): levantar e sentar de uma cadeira, em vista
+        lateral.
+    São movimentos esperados (sem desvio), usados como controle negativo.
+    Fonte/URL e licença: (inserir os links dos vídeos).
+  - Áudios sintéticos de consulta (pasta test_data/synthetic_audio/): 6
+    cenários criados com a voz pt-BR do Windows (SAPI, "Microsoft Maria"), cada
+    um com o .wav e a transcrição em .txt. Servem para provar que cada regra de
+    áudio dispara quando deveria.
+  - Bases avaliadas e descartadas: o AudioSet distribui apenas listas de
+    identificadores do YouTube e embeddings, sem os áudios; a base
+    multi-gait-posture (PhysioNet) tem 19,5 GB e contém apenas quadros de
+    profundidade e dados Xsens, sem vídeo RGB, o que a torna inutilizável para
+    o OpenPose; a base PhysioNet VOICED (vogais sustentadas) foi testada no
+    início, mas não contém fala conversada e foi retirada do projeto.
+
+2.2 Preparo dos dados de teste
+  - UR Fall: o dataset distribui o RGB como sequência de imagens PNG em
+    arquivos .zip. Os quadros da câmera 0 foram decodificados em ordem e
+    gravados em .mp4 a 30 fps, resultando em 5 vídeos de 3,2 a 7,2 s. Os .zip
+    originais e o script de conversão não fazem parte da pasta atual.
+  - A câmera 1 do UR Fall (vista de teto, profundidade e RGB lado a lado) foi
+    testada e descartada, pois a pessoa mal aparece no enquadramento.
+  - Áudios sintéticos: as frases foram sintetizadas com a voz do Windows; o
+    silêncio do início e do fim de cada frase foi cortado, o volume foi
+    igualado entre frases, e cada cenário foi montado com pausas, fala lenta
+    ou queda de volume controladas (rampa linear em dB). O script gerador não
+    faz parte da pasta atual.
+  - Os vídeos do YouTube são usados como baixados, sem conversão.
+
+2.3 Modelos utilizados
+  - OpenPose (modelo COCO de 18 keypoints, pose_iter_440000.caffemodel, cerca
+    de 200 MB) executado pelo módulo DNN do OpenCV (cv2.dnn.readNetFromCaffe),
+    sem necessidade de compilar o OpenPose original. O prototxt vem do
+    repositório oficial; os pesos são baixados por download_openpose_models.py.
+  - YOLOv8 nano (yolov8n.pt, ultralytics): detecta pessoas (classe 0) e objetos
+    cortantes (faca, classe 43; tesoura, classe 76). Baixado automaticamente na
+    primeira execução, para video_analysis/models/.
+  - SpeechRecognition (recognize_google, pt-BR): transcrição, como no script
+    transcribe_audio.py da aula. É usada apenas se não houver um .txt com o
+    mesmo nome do áudio.
+  - Análise acústica própria, com NumPy/SciPy (energia, pausas, pitch por
+    autocorrelação), e análise de texto por dicionário de termos críticos e
+    léxico de sentimento.
+
+--------------------------------------------------------------------------------
+3. MÓDULOS DO SISTEMA
+--------------------------------------------------------------------------------
+
+3.1 Análise de vídeo (video_analysis/)
+
+  Arquivos e responsabilidades:
+  - video_analysis.py: script principal. Lê o vídeo quadro a quadro, aplica o
+    YOLOv8 e o OpenPose, monta a tabela de características, grava o vídeo
+    anotado e chama as regras e o relatório.
+  - openpose_estimator.py: classe OpenPoseEstimator (carrega a rede e estima os
+    keypoints) e função draw_skeleton (desenha o esqueleto).
+  - pose_analysis.py: cálculo de ângulos e características posturais e regras
+    de detecção de desvios.
+  - report.py: resumo, relatório (.md e .json) e conversão dos desvios em
+    alertas.
+  - download_openpose_models.py: baixa o prototxt e os pesos do OpenPose.
+
+  Fluxo de processamento (analyze_video):
+  1. Carrega o OpenPose e o YOLOv8 e abre o vídeo com OpenCV.
+  2. Analisa 1 a cada 3 quadros (FRAME_STRIDE = 3) para reduzir o custo; a taxa
+     efetiva de análise (fps/3) é usada nas regras de duração.
+  3. O YOLOv8 detecta todas as pessoas e objetos do quadro.
+  4. pick_main_person escolhe a pessoa de maior caixa, assumida como o
+     paciente, recorta a região e envia apenas o recorte ao OpenPose. Isso é
+     necessário porque o modelo do OpenPose usado é de pessoa única. As
+     coordenadas dos keypoints são devolvidas ao sistema de coordenadas do
+     quadro original.
+  5. O OpenPose gera um mapa de calor por articulação; a posição de maior
+     intensidade é tomada como a articulação e a intensidade como a confiança
+     (descartada abaixo de 0,1).
+  6. extract_pose_features calcula, por quadro, o ângulo de inclinação do
+     tronco, os ângulos dos dois joelhos, a proporção largura/altura da caixa
+     da pessoa e o centro da caixa (cx, cy).
+  7. Objetos cortantes detectados são marcados em vermelho e contados.
+  8. O quadro anotado (esqueleto, caixa, ângulo do tronco, área segura) é
+     gravado no vídeo de saída.
+
+  Características calculadas (pose_analysis.py):
+  - Inclinação do tronco: ângulo entre a linha quadril-ombro (pontos médios dos
+    dois lados) e a vertical; 0 graus = em pé, 90 graus = deitado.
+  - Ângulo do joelho: ângulo no joelho formado por quadril-joelho-tornozelo,
+    calculado pelo produto escalar dos vetores (180 graus = perna estendida).
+  - Proporção da caixa: largura/altura; maior que 1 indica pessoa deitada.
+  - Keypoints com confiança abaixo de 0,2 são considerados inválidos, e a
+    característica correspondente fica vazia (NaN).
+
+  Regras de detecção de desvios (detect_deviations):
+  - Possível queda (severidade alta): caixa mais larga que alta (proporção > 1,0)
+    e tronco acima de 60 graus; quando o paciente está deitado e o OpenPose não
+    encontra ombros e quadris (tronco = NaN), a caixa horizontal sozinha basta.
+    Falhas de detecção de até 2 quadros são fechadas para não quebrar o evento.
+  - Inclinação excessiva do tronco (média): acima de 35 graus.
+  - Flexão excessiva do joelho (média): ângulo abaixo de 60 graus.
+  - Assimetria entre os joelhos (baixa): diferença acima de 25 graus.
+  - Saída da área segura (média): centro do paciente fora do retângulo
+    configurável SAFE_ZONE (por padrão, 5% a 95% do quadro).
+  - Paciente ausente (média): não detectado por mais de 5 s.
+  - Um desvio só é registrado se durar ao menos 0,5 s (MIN_EVENT_SECONDS); cada
+    trecho contínuo vira um evento com início, fim, tipo e severidade.
+  - Os limiares são ilustrativos e não foram calibrados clinicamente; ficam em
+    constantes no início do pose_analysis.py para fácil ajuste.
+
+  Saídas (pasta de saída do vídeo):
+  - output_video_pose.mp4: vídeo anotado com o esqueleto.
+  - pose_features.csv: características por quadro analisado.
+  - movement.csv: trajetória do paciente (timestamp, patient_id, x, y).
+  - video_report.md e video_report.json: resumo (duração, quadros com paciente,
+    maior inclinação do tronco, menor ângulo de joelho, quadros com objeto
+    cortante) e a lista de desvios.
+  - video_alerts.json: desvios convertidos em alertas.
+
+3.2 Análise de áudio (audio_analysis/)
+
+  Arquivos e responsabilidades:
+  - audio_analysis.py: orquestra a análise (transcrição, voz, texto, alertas e
+    relatório).
+  - voice_analysis.py: extração de características vocais e regras.
+  - text_analysis.py: termos críticos e sentimento.
+
+  Transcrição (get_transcription): se existir um .txt com o mesmo nome do áudio
+  (ex.: consulta.wav e consulta.txt), ele é usado; caso contrário o áudio é
+  transcrito com SpeechRecognition (recognize_google, pt-BR), como no script da
+  aula, e o resultado é salvo em .txt. A contagem de palavras da transcrição
+  alimenta a taxa de fala.
+
+  Características vocais (extract_voice_features):
+  - O áudio é lido, convertido para mono e normalizado pelo pico, e dividido em
+    quadros de 30 ms com avanço de 10 ms.
+  - Energia: valor RMS de cada quadro. Quadros com fala são os que têm energia
+    acima de 10% do percentil 95.
+  - Pausas: sequências de quadros sem fala dentro do trecho falado, com pelo
+    menos 0,3 s. Calculam-se a quantidade, a proporção do tempo em pausa e a
+    maior pausa.
+  - Tendência de energia: reta ajustada (polyfit) à energia em dB ao longo do
+    tempo, em dB por minuto; inclinação negativa indica a voz perdendo força.
+  - Pitch (frequência fundamental): estimado por autocorrelação em quadros com
+    fala, na faixa de 75 a 400 Hz; quadros com pico fraco são descartados. Dele
+    saem o pitch médio e o coeficiente de variação (variação da entonação).
+  - Taxa de fala: palavras da transcrição divididas pela duração da fala, em
+    palavras por minuto.
+
+  Regras vocais (detect_voice_indicators):
+  - Fala entrecortada (média): pausas ocupam mais de 35% da fala.
+  - Pausa longa (média): uma pausa acima de 3 s.
+  - Queda de energia (média): inclinação abaixo de -4 dB/min (possível fadiga).
+  - Fala lenta (média): menos de 100 palavras por minuto.
+  - Fala monótona (baixa): coeficiente de variação do pitch abaixo de 0,05.
+  - Indício de fadiga ou disartria (alta): 3 ou mais indicadores simultâneos.
+
+  Análise do texto (text_analysis.py):
+  - O texto é normalizado (minúsculas, sem acentos e sem pontuação).
+  - Termos críticos: dicionário com severidade por termo, por exemplo "dor no
+    peito", "falta de ar", "nao consigo respirar", "desmaio" (alta); "tontura",
+    "cansaco", "febre", "palpitacao" (média); "dor" (baixa). A busca é por
+    palavra inteira e dos termos mais longos para os mais curtos, para que
+    "dor no peito" não conte também como "dor".
+  - Sentimento: léxico simples de palavras negativas e positivas; pontuação de
+    -1 a 1, classificada como negativo (abaixo de -0,3), neutro ou positivo
+    (acima de 0,3). Sentimento negativo gera um alerta de severidade baixa.
+
+  Saídas: audio_report.md e audio_report.json (características, indicadores,
+  termos, sentimento e transcrição) e audio_alerts.json.
+
+3.3 Orquestrador multimodal (run_multimodal.py)
+  - Recebe --video e/ou --audio (ao menos um), --patient (padrão P001) e
+    --output (padrão output/). Cada modalidade é opcional.
+  - Chama run_analysis de cada módulo e obtém os alertas e o resumo de cada um.
+  - fuse_alerts une os alertas das duas modalidades e aplica a regra de
+    convergência: se houver alerta de severidade média ou alta no vídeo E no
+    áudio, é criado um alerta adicional "multimodal" de severidade alta.
+  - risk_level define o risco geral pela maior severidade encontrada: nenhum
+    alerta = normal; baixa = baixo; média = moderado; alta = alto.
+  - Os alertas são exibidos por severidade (notify_medical_team) e salvos em
+    multimodal_report.md, multimodal_report.json e multimodal_alerts.json.
+
+  Formato de alerta (alerts.py): dicionário com source (video, audio ou
+  multimodal), patient_id, severity (baixa, media ou alta), message, timestamp e
+  details. notify_medical_team apenas imprime no console; pode ser substituída
+  por e-mail, Teams ou webhook.
+
+3.4 Casos de teste executados (evidência de funcionamento)
+
+  Vídeo - UR Fall, sequência fall-01 (160 quadros, 640x480, 30 fps)
+    - Execução completa (YOLOv8 + OpenPose) em CPU: cerca de 3 minutos.
+    - Em pé, o tronco ficou entre 0 e 6 graus. A partir de 3,0 s a queda
+      aparece nos dados: ângulo do joelho caindo, proporção da caixa passando
+      de 1,0 (chegando a 1,86) e centro da caixa descendo de y = 212 para
+      y = 427.
+    - Na primeira execução a queda não foi detectada: com a pessoa deitada o
+      OpenPose não encontra ombros e quadris, o tronco fica NaN e a regra
+      exigia tronco acima de 60 graus. A regra foi corrigida (ver 3.1) e passou
+      a detectar "possivel_queda" de 4,1 s a 5,3 s, severidade alta.
+    - Observação: após a correção, a regra foi reaplicada às características já
+      extraídas (pose_features.csv) desse vídeo. As demais sequências
+      (fall-02 a fall-05) foram convertidas, mas não há registro de
+      processamento delas até aqui.
+
+  Vídeo - YouTube, ok1-video.mp4 (caminhada em corredor, 1080x1920)
+    - Execução registrada em output/ (junto com o áudio 01_controle_normal):
+      149 quadros analisados (14,8 s), paciente detectado em todos os 149.
+    - Tronco entre 0 e 13 graus (média de 1,9), joelhos entre 134 e 180 graus,
+      proporção da caixa entre 0,2 e 0,6: nenhum desvio, nenhum alerta, risco
+      geral normal. É o comportamento esperado para esse controle negativo.
+    - O vídeo ok2-video.mp4 (levantar e sentar, vista lateral) consta na pasta,
+      mas não há registro de processamento dele em output/.
+
+  Áudio - sintético (6 cenários; resultado da análise)
+    01_controle_normal      : fala normal (137,5 palavras/min, 3% de pausas,
+                              sentimento positivo) -> nenhum alerta (risco
+                              normal).
+    02_termos_criticos      : 3 termos de severidade alta, 2 de média e
+                              sentimento negativo -> risco alto. Também
+                              apareceu "queda de energia" (7,5 dB/min), efeito
+                              da voz sintética perder volume ao fim das frases.
+    03_pausas_longas        : pausas em 40% da fala, pausa de 4,2 s e fala
+                              lenta (86 palavras/min) -> alerta alto de 3
+                              indicadores.
+    04_queda_de_energia     : apenas queda de energia (18,7 dB/min) -> moderado.
+    05_fala_lenta           : apenas fala lenta (51 palavras/min) -> moderado.
+    06_caso_grave_combinado : 4 indicadores vocais, 3 termos altos e 2 médios,
+                              sentimento negativo -> 11 alertas, risco alto.
+
+  Áudio - real: no teste inicial com vogais sustentadas (PhysioNet VOICED,
+  retirado do projeto), apenas o alerta de fala monótona (baixa) disparava, em
+  vozes saudáveis e patológicas. Como esse conjunto não tem fala conversada,
+  ele não validava as demais regras, o que motivou os áudios sintéticos.
+
+  Fusão multimodal - caso positivo (fall-01.mp4 + 06_caso_grave_combinado.wav):
+    - Vídeo: 1 alerta de severidade alta (possível queda, 4,1 s a 5,3 s).
+    - Áudio: 12 alertas (4 indicadores vocais, 5 termos críticos, sentimento
+      negativo), 4 deles de severidade alta.
+    - Fusão: como há alertas relevantes (média ou alta) nas duas modalidades, a
+      regra de convergência criou 1 alerta "multimodal" de severidade alta
+      ("1 alerta relevante no vídeo e 10 no áudio"). Total de 13 alertas e
+      risco geral alto.
+  Fusão multimodal - caso negativo (ok1-video.mp4 + 01_controle_normal.wav):
+    nenhum alerta em nenhuma modalidade, risco geral normal.
+
+--------------------------------------------------------------------------------
+4. SEGURANÇA, LIMITAÇÕES E EXPLICABILIDADE
+--------------------------------------------------------------------------------
+
+  - Finalidade: o sistema é acadêmico e de demonstração. Os alertas não
+    substituem avaliação médica profissional e servem apenas como apoio à
+    decisão da equipe.
+  - Dados: nenhum dado real de paciente é utilizado; os dados são públicos
+    (UR Fall), vídeos do YouTube usados só como teste, ou sintéticos. Para o
+    UR Fall, a licença CC BY-NC-SA 4.0 restringe o uso a fins acadêmicos e não
+    comerciais. Os vídeos do YouTube devem ter a fonte e a licença informadas.
+  - Limiares não calibrados: os valores das regras (ângulos, pausas, taxa de
+    fala etc.) são ilustrativos. Os indicadores vocais são heurísticas de
+    apoio, não diagnóstico.
+  - Pessoa única: o OpenPose empregado estima a pose de uma pessoa por vez; o
+    paciente é assumido como a maior pessoa detectada pelo YOLOv8 no quadro.
+    Cenas com várias pessoas grandes podem confundir essa escolha.
+  - Pessoa deitada: o OpenPose perde a confiança em ombros e quadris quando o
+    corpo está na horizontal; por isso a regra de queda usa também a proporção
+    da caixa.
+  - Taxa de fala: é calculada sobre o trecho falado inteiro, incluindo as
+    pausas; pausas longas reduzem as palavras por minuto e podem disparar
+    também o alerta de fala lenta.
+  - Explicabilidade: cada alerta traz mensagem em linguagem clara, tipo, horário
+    e, no vídeo, os instantes de início e fim do desvio; os relatórios guardam
+    as características que geraram a decisão (pose_features.csv,
+    audio_report.json).
+  - Dependências: o OpenCV 5 removeu o leitor de modelos Caffe; por isso o
+    requirements.txt fixa opencv-python<5. O servidor original dos pesos do
+    OpenPose (CMU) estava fora do ar, e o script de download usa um espelho no
+    Hugging Face como primeira fonte e o servidor da CMU como reserva.
+  - Internet: usada apenas no primeiro download dos modelos e na transcrição
+    automática; esta pode ser evitada com a transcrição salva em .txt.
+
+--------------------------------------------------------------------------------
+5. ORGANIZAÇÃO DO PROJETO E ARQUIVOS ENTREGUES
+--------------------------------------------------------------------------------
+
+  tech-challenge-4/
+    |- run_multimodal.py                  (orquestrador: fusão vídeo + áudio)
+    |- alerts.py                          (formato padrão de alerta)
+    |- requirements.txt                   (dependências do projeto)
+    |- README.md                          (instruções completas de execução)
+    |- relatorio_tecnico_tech_challenge_4.txt (este relatório)
+    |- video_analysis/
+    |    |- video_analysis.py             (processamento do vídeo)
+    |    |- openpose_estimator.py         (estimador OpenPose via OpenCV DNN)
+    |    |- download_openpose_models.py   (baixa os modelos, cerca de 200 MB)
+    |    |- pose_analysis.py              (características e regras de desvio)
+    |    |- report.py                     (relatório e alertas)
+    |    |- models/                       (pesos do OpenPose e do YOLOv8)
+    |    |- requirements.txt
+    |- audio_analysis/
+    |    |- audio_analysis.py             (orquestra a análise de áudio)
+    |    |- voice_analysis.py             (características e regras vocais)
+    |    |- text_analysis.py              (termos críticos e sentimento)
+    |    |- requirements.txt
+    |- test_data/
+    |    |- ur_fall_videos/               (5 vídeos de queda, fall-01 a fall-05)
+    |    |- youtube/                      (ok1-video.mp4 e ok2-video.mp4)
+    |    |- synthetic_audio/              (6 cenários, cada um .wav + .txt)
+    |- output/                            (gerada na execução: relatórios,
+    |                                      alertas, vídeo anotado e CSVs)
+
+  Execução (resumo):
+    pip install -r requirements.txt
+    python video_analysis/download_openpose_models.py
+    python run_multimodal.py --video <video.mp4> --audio <audio.wav> --patient P001
+
+

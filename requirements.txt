@@ -1,0 +1,7 @@
+ultralytics
+opencv-python<5
+numpy
+pandas
+scipy
+tqdm
+SpeechRecognition
